@@ -13,10 +13,16 @@ bot = telebot.TeleBot(BOT_TOKEN)
 # ====================== БАЗА ДАННЫХ ======================
 DB_NAME = "life_simulator.db"
 
+# Удаляем старую БД при запуске, чтобы избежать ошибок со структурой
+if os.path.exists(DB_NAME):
+    os.remove(DB_NAME)
+    print("🔄 Старая база данных удалена")
+
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
+    # 29 колонок
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -46,7 +52,7 @@ def init_db():
             has_apartment INTEGER DEFAULT 0,
             has_penthouse INTEGER DEFAULT 0,
             is_alive INTEGER DEFAULT 1,
-            game_stage TEXT DEFAULT 'birth',
+            game_stage TEXT DEFAULT 'baby',
             last_event_date TEXT DEFAULT ''
         )
     ''')
@@ -123,6 +129,7 @@ def init_db():
 
     conn.commit()
     conn.close()
+    print("✅ Новая база данных создана")
 
 init_db()
 
@@ -241,7 +248,7 @@ def get_stage_by_age(months):
     else: return "old"
 
 def apply_effects(user_id, effects):
-    if not effects: return
+    if not effects: return []
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     changes = []
@@ -258,7 +265,7 @@ def apply_effects(user_id, effects):
             else:
                 cursor.execute(f"UPDATE users SET {col} = MAX(0, MIN(100, {col} + ?)) WHERE user_id = ?", (delta, user_id))
             sign = "+" if delta >= 0 else ""
-            changes.append(f"{'💰' if col == 'money' else get_stat_emoji(col)} {get_stat_name(col)}: {sign}{delta}")
+            changes.append(f"{get_stat_emoji(col)} {get_stat_name(col)}: {sign}{delta}")
     conn.commit()
     conn.close()
     return changes
@@ -340,7 +347,7 @@ def get_profile_text(user):
 
 # ====================== КЛАВИАТУРЫ ======================
 
-def main_menu_keyboard(user):
+def main_menu_keyboard(user=None):
     keyboard = types.InlineKeyboardMarkup(row_width=2)
     keyboard.add(
         types.InlineKeyboardButton("▶️ Продолжить жизнь", callback_data="continue_life"),
@@ -398,6 +405,12 @@ def start_command(message):
     if user and user["is_alive"] == 1:
         bot.send_message(user_id, f"👋 С возвращением, {user['name']}!", reply_markup=main_menu_keyboard(user))
     else:
+        # Удаляем старую запись если есть
+        conn = sqlite3.connect(DB_NAME)
+        conn.cursor().execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        
         user_temp[user_id] = {}
         keyboard = types.InlineKeyboardMarkup(row_width=2)
         keyboard.add(
@@ -410,7 +423,7 @@ def start_command(message):
 def choose_gender(call):
     user_id = call.from_user.id
     gender = call.data.split("_")[1]
-    user_temp[user_id]["gender"] = gender
+    user_temp[user_id] = {"gender": gender}
     
     keyboard = types.InlineKeyboardMarkup(row_width=2)
     keyboard.add(
@@ -432,7 +445,7 @@ def choose_name(call):
         user_temp[user_id]["name"] = name
         ask_nickname(call)
     else:
-        bot.edit_message_text("✏️ Отправь имя персонажа:", user_id, call.message.message_id)
+        msg = bot.edit_message_text("✏️ Отправь имя персонажа:", user_id, call.message.message_id)
         bot.register_next_step_handler(call.message, process_name)
 
 def process_name(message):
@@ -464,7 +477,7 @@ def choose_nickname(call):
         user_temp[user_id]["nickname"] = ""
         ask_family(call)
     else:
-        bot.edit_message_text("✏️ Отправь прозвище:", user_id, call.message.message_id)
+        msg = bot.edit_message_text("✏️ Отправь прозвище:", user_id, call.message.message_id)
         bot.register_next_step_handler(call.message, process_nickname)
 
 def process_nickname(message):
@@ -501,14 +514,11 @@ def choose_family(call):
     user_temp[user_id]["luck"] = fam[3]
     user_temp[user_id]["stress"] = fam[4]
     
-    ask_country(call)
-
-def ask_country(call):
     keyboard = types.InlineKeyboardMarkup(row_width=2)
     for name, code, _, _, _ in get_countries():
         keyboard.add(types.InlineKeyboardButton(name, callback_data=f"country_{code}"))
     keyboard.add(types.InlineKeyboardButton("🎲 Случайно", callback_data="country_random"))
-    bot.edit_message_text("🌍 Страна рождения:", call.from_user.id, call.message.message_id, reply_markup=keyboard)
+    bot.edit_message_text("🌍 Страна рождения:", user_id, call.message.message_id, reply_markup=keyboard)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("country_"))
 def choose_country(call):
@@ -532,11 +542,18 @@ def choose_country(call):
     cursor = conn.cursor()
     birth_date = (datetime.now() - timedelta(days=random.randint(0, 365*18))).strftime("%d.%m.%Y")
     
-    cursor.execute('''INSERT OR REPLACE INTO users VALUES 
-        (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-        (user_id, call.from_user.username, call.from_user.first_name, gender,
-         birth_date, country[0], country[2], name, nickname, family, 0, 30, 80, 30, luck,
-         money, stress, 60, 50, 0, '', '', '', '', 0, 0, 1, 'baby', ''))
+    # Ровно 29 значений
+    cursor.execute('''
+        INSERT OR REPLACE INTO users 
+        (user_id, username, first_name, gender, birth_date, country, city, name, nickname,
+         family_wealth, age_months, intelligence, health, charisma, luck, money, stress,
+         happiness, reputation, criminal_level, education, job, car, bike,
+         has_apartment, has_penthouse, is_alive, game_stage, last_event_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 30, 80, 30, ?, ?, ?, 60, 50, 0, '', '', '', '', 0, 0, 1, 'baby', '')
+    ''', (user_id, call.from_user.username or "", call.from_user.first_name or "", gender,
+          birth_date, country[0], country[2], name, nickname, family,
+          luck, money, stress))
+    
     conn.commit()
     conn.close()
     
@@ -561,7 +578,6 @@ def next_month(call):
     cursor = conn.cursor()
     cursor.execute("UPDATE users SET age_months = age_months + 1 WHERE user_id = ?", (user_id,))
     
-    # Базовый доход/расход
     if user["age_months"] // 12 >= 18:
         if user["job"]:
             salary = random.randint(20000, 80000)
@@ -578,7 +594,7 @@ def next_month(call):
         bot.edit_message_text(
             f"💀 *Ты умер!*\nВозраст: {death_age} лет\nПричина: {death_reason}\n💰 {user['money']:,} ₽\nРейтинг: *{rank}*",
             user_id, call.message.message_id, parse_mode="Markdown",
-            reply_markup=main_menu_keyboard(user))
+            reply_markup=main_menu_keyboard())
         return
     
     age_text = get_age_text(user["age_months"])
@@ -587,7 +603,6 @@ def next_month(call):
     bot.edit_message_text(text, user_id, call.message.message_id, parse_mode="Markdown",
                          reply_markup=life_actions_keyboard(user))
 
-# Действия игрока
 @bot.callback_query_handler(func=lambda call: call.data.startswith("action_"))
 def player_action(call):
     user_id = call.from_user.id
@@ -630,7 +645,6 @@ def player_action(call):
         user_id, call.message.message_id, parse_mode="Markdown",
         reply_markup=life_actions_keyboard(user))
 
-# Магазин
 @bot.callback_query_handler(func=lambda call: call.data == "shop")
 def shop_menu(call):
     user = get_db_user(call.from_user.id)
@@ -680,16 +694,17 @@ def buy_item(call):
         return
     
     changes = apply_effects(user_id, {"money": -price})
-    apply_effects(user_id, effects)
+    changes2 = apply_effects(user_id, effects)
+    all_changes = changes + changes2
     
     user = get_db_user(user_id)
-    bot.answer_callback_query(call.id, f"Куплено: {name}")
+    change_text = "\n".join(all_changes)
+    
     bot.edit_message_text(
-        f"✅ Куплено: {name}\n\n{get_profile_text(user)}",
+        f"✅ Куплено: {name}\n\n📊 *Изменения:*\n{change_text}\n\n{get_profile_text(user)}",
         user_id, call.message.message_id, parse_mode="Markdown",
         reply_markup=life_actions_keyboard(user))
 
-# Транспорт
 @bot.callback_query_handler(func=lambda call: call.data == "transport")
 def transport_menu(call):
     keyboard = types.InlineKeyboardMarkup(row_width=2)
@@ -747,12 +762,10 @@ def buy_vehicle(call):
     conn.close()
     
     user = get_db_user(user_id)
-    bot.answer_callback_query(call.id, f"Куплено: {name}!")
     bot.edit_message_text(f"✅ Куплено: {name}\n\n{get_profile_text(user)}",
                          user_id, call.message.message_id, parse_mode="Markdown",
                          reply_markup=life_actions_keyboard(user))
 
-# Путешествия
 @bot.callback_query_handler(func=lambda call: call.data == "travel")
 def travel_menu(call):
     user = get_db_user(call.from_user.id)
@@ -779,7 +792,7 @@ def travel_go(call):
     
     changes = apply_effects(user_id, {"money": -price})
     changes2 = apply_effects(user_id, effects)
-    all_changes = (changes or []) + (changes2 or [])
+    all_changes = changes + changes2
     
     user = get_db_user(user_id)
     change_text = "\n".join(all_changes)
@@ -789,7 +802,6 @@ def travel_go(call):
         user_id, call.message.message_id, parse_mode="Markdown",
         reply_markup=life_actions_keyboard(user))
 
-# Остальные обработчики (профиль, меню, отношения и т.д.)
 @bot.callback_query_handler(func=lambda call: call.data == "profile")
 def show_profile(call):
     user = get_db_user(call.from_user.id)
@@ -800,10 +812,13 @@ def show_profile(call):
 @bot.callback_query_handler(func=lambda call: call.data == "main_menu")
 def return_to_menu(call):
     user = get_db_user(call.from_user.id)
-    b = main_menu_keyboard(user) if user and user["is_alive"] == 1 else types.InlineKeyboardMarkup().add(
-        types.InlineKeyboardButton("🆕 Новая жизнь", callback_data="new_life"))
-    text = f"🏠 *Главное меню*\n\n{get_profile_text(user)}" if user and user["is_alive"] == 1 else "🏠 *Главное меню*"
-    bot.edit_message_text(text, call.from_user.id, call.message.message_id, parse_mode="Markdown", reply_markup=b)
+    if user and user["is_alive"] == 1:
+        text = f"🏠 *Главное меню*\n\n{get_profile_text(user)}"
+        markup = main_menu_keyboard(user)
+    else:
+        text = "🏠 *Главное меню*\n\nНачни новую жизнь!"
+        markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🆕 Новая жизнь", callback_data="new_life"))
+    bot.edit_message_text(text, call.from_user.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == "past_lives")
 def show_past_lives(call):
@@ -814,9 +829,15 @@ def show_past_lives(call):
     cursor.execute("SELECT * FROM past_lives WHERE user_id = ? ORDER BY life_number DESC LIMIT 5", (user_id,))
     lives = cursor.fetchall()
     conn.close()
-    text = "\n".join([f"#{l['life_number']} | {l['country']} | {l['death_age']} лет | {l['death_reason']} | Рейтинг: {l['life_rank']}" for l in lives]) if lives else "Нет прошлых жизней"
-    bot.edit_message_text(f"📜 *Прошлые жизни:*\n\n{text}", user_id, call.message.message_id,
-                         parse_mode="Markdown", reply_markup=main_menu_keyboard(get_db_user(user_id)))
+    if lives:
+        text = "📜 *Прошлые жизни:*\n\n" + "\n\n".join([
+            f"#{l['life_number']} | {l['country']}\n{l['death_age']} лет | {l['death_reason']}\nРейтинг: *{l['life_rank']}* | 💰 {l['money']:,} ₽"
+            for l in lives
+        ])
+    else:
+        text = "Нет прошлых жизней"
+    bot.edit_message_text(text, user_id, call.message.message_id, parse_mode="Markdown",
+                         reply_markup=main_menu_keyboard())
 
 @bot.callback_query_handler(func=lambda call: call.data == "new_life")
 def new_life_button(call):
@@ -824,8 +845,10 @@ def new_life_button(call):
     if user and user["is_alive"] == 1: end_life(user)
     user_temp[call.from_user.id] = {}
     keyboard = types.InlineKeyboardMarkup(row_width=2)
-    keyboard.add(types.InlineKeyboardButton("👨 Мужской", callback_data="gender_male"),
-                 types.InlineKeyboardButton("👩 Женский", callback_data="gender_female"))
+    keyboard.add(
+        types.InlineKeyboardButton("👨 Мужской", callback_data="gender_male"),
+        types.InlineKeyboardButton("👩 Женский", callback_data="gender_female")
+    )
     bot.edit_message_text("🌟 *Новая жизнь!*\nВыбери пол:", call.from_user.id, call.message.message_id,
                          parse_mode="Markdown", reply_markup=keyboard)
 
@@ -833,8 +856,11 @@ def new_life_button(call):
 def stub_menus(call):
     user = get_db_user(call.from_user.id)
     if not user: return
-    texts = {"relationships": "❤️ *Отношения*", "business": "💰 *Бизнес*", "jail_status": "🚔 *Тюрьма*"}
-    bot.edit_message_text(f"{texts.get(call.data,'')}\n\nВ разработке...\n\n{get_profile_text(user)}",
+    texts = {"relationships": "❤️ *Отношения*\nВ разработке...", 
+             "business": "💰 *Бизнес*\nВ разработке...", 
+             "jail_status": "🚔 *Тюрьма*\nТы на свободе!",
+             "continue_life": "▶️ Продолжаем жить!"}
+    bot.edit_message_text(f"{texts.get(call.data, '')}\n\n{get_profile_text(user)}",
                          call.from_user.id, call.message.message_id, parse_mode="Markdown",
                          reply_markup=main_menu_keyboard(user))
 
